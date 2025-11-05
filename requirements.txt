@@ -1,0 +1,18 @@
+# Core libraries
+pandas
+numpy
+scipy
+
+# Modeling
+pymc
+pymc-marketing
+statsmodels
+scikit-learn
+
+# Visualization
+matplotlib
+seaborn
+plotly
+
+# Notebooks
+jupyterlab

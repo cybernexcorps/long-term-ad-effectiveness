@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(gh --version:*)",
+      "Bash(gh auth status:*)",
+      "Bash(git init:*)",
+      "Bash(gh repo create:*)",
+      "Bash(git add:*)",
+      "Bash(git commit -m \"$(cat <<''EOF''\nInitial commit: MMM framework for long-term ad effectiveness\n\nThis framework implements a two-step Bayesian approach for measuring marketing ROI:\n- UCM-MMM for short-term activation effects\n- BVAR for long-term brand-building effects\n\nIncludes data preparation, modeling scripts, Jupyter notebooks, and comprehensive documentation.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nEOF\n)\")"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
