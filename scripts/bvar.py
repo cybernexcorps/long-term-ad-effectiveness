@@ -1,242 +1,339 @@
-"""
-Bayesian Vector Autoregression (BVAR) Model for Long-Term Marketing Effects.
-
-This module implements a BVAR model to capture long-term brand-building effects
-of marketing on base sales through dynamic relationships with brand metrics.
-"""
 
 import pymc as pm
 import numpy as np
-
+import pytensor.tensor as pt
+import matplotlib.pyplot as plt
+import seaborn as sns
 
 class BVAR:
-    """
-    Bayesian Vector Autoregression model for long-term marketing effects.
-
-    This class models the dynamic, interdependent relationships between multiple
-    time series: base sales, brand metrics, and marketing spend. It uses Impulse
-    Response Functions (IRF) to trace how marketing investments build brand equity
-    and drive sustained sales growth over 12+ months.
-
-    Attributes:
-        endog (np.ndarray): Endogenous variables (base sales, brand metrics)
-                           Shape: (n_periods, n_endog_vars)
-        exog (np.ndarray): Exogenous variables (marketing spend by channel)
-                          Shape: (n_periods, n_channels)
-        lags (int): Number of lagged periods to include in the VAR model
-        model (pm.Model): PyMC model object
-        trace (pm.InferenceData): MCMC sampling trace with posterior distributions
-
-    Example:
-        >>> # Endogenous: [base_sales, awareness, consideration]
-        >>> endog = np.column_stack([base_sales, awareness, consideration])
-        >>> # Exogenous: [linkedin_spend, google_spend, content_spend]
-        >>> exog = np.column_stack([linkedin, google, content])
-        >>> bvar = BVAR(endog, exog, lags=4)
-        >>> bvar.build_model()
-        >>> bvar.fit(draws=2000)
-        >>> irf = bvar.calculate_irf(periods=52)  # 52 weeks
-        >>> long_term_roi = bvar.calculate_long_term_roi(irf)
-    """
-
-    def __init__(self, endog, exog, lags):
+    def __init__(self, endog, exog, lags, endog_names=None, exog_names=None):
         """
-        Initialize the BVAR model.
+        Bayesian Vector Autoregression (BVAR) model.
 
-        Args:
-            endog (np.ndarray): Endogenous variables matrix
-                               (n_periods x n_variables)
-                               Typically: [base_sales, brand_awareness, consideration]
-            exog (np.ndarray): Exogenous variables matrix
-                              (n_periods x n_channels)
-                              Marketing spend by channel
-            lags (int): Number of autoregressive lags (typically 2-4 weeks)
+        Parameters:
+        -----------
+        endog : array-like (n_periods, n_endog)
+            Endogenous variables (e.g., base sales, brand awareness, consideration)
+        exog : array-like (n_periods, n_exog)
+            Exogenous variables (e.g., marketing spend by channel)
+        lags : int
+            Number of lags to include in the VAR model
+        endog_names : list of str, optional
+            Names of endogenous variables
+        exog_names : list of str, optional
+            Names of exogenous variables
         """
-        self.endog = endog
-        self.exog = exog
+        self.endog = np.array(endog)
+        self.exog = np.array(exog)
         self.lags = lags
         self.model = None
         self.trace = None
 
+        # Set default names if not provided
+        self.endog_names = endog_names or [f"endog_{i}" for i in range(self.endog.shape[1])]
+        self.exog_names = exog_names or [f"exog_{i}" for i in range(self.exog.shape[1])]
+
+        # Prepare lagged data
+        self._prepare_data()
+
+    def _prepare_data(self):
+        """Prepare lagged endogenous variables for VAR model."""
+        n_periods, n_endog = self.endog.shape
+
+        # Create lagged endogenous matrix
+        # For each period t, include Y[t-1], Y[t-2], ..., Y[t-L]
+        lagged_endog_list = []
+        for lag in range(1, self.lags + 1):
+            lagged = np.roll(self.endog, lag, axis=0)
+            lagged[:lag, :] = 0  # Set initial periods to 0
+            lagged_endog_list.append(lagged)
+
+        # Stack: [Y_t-1, Y_t-2, ..., Y_t-L]
+        self.lagged_endog = np.concatenate(lagged_endog_list, axis=1)
+
+        # Remove first 'lags' periods (no valid history)
+        self.Y = self.endog[self.lags:]
+        self.X_lagged = self.lagged_endog[self.lags:]
+        self.X_exog = self.exog[self.lags:]
+
+        self.n_obs = len(self.Y)
+
     def build_model(self):
-        """
-        Build the Bayesian Vector Autoregression model.
+        """Build BVAR model with VAR structure and exogenous variables."""
+        n_endog = self.endog.shape[1]
+        n_exog = self.exog.shape[1]
+        n_lagged = n_endog * self.lags
 
-        Model Structure:
-            y[t] = A1*y[t-1] + A2*y[t-2] + ... + Ap*y[t-p] + B*x[t] + e[t]
-
-        Where:
-            - y[t]: Endogenous variables at time t (base sales, brand metrics)
-            - A1...Ap: VAR coefficient matrices for lags 1 to p
-            - x[t]: Exogenous variables at time t (marketing spend)
-            - B: Coefficient matrix for exogenous variables
-            - e[t]: Error term with covariance matrix Sigma
-
-        Priors:
-            - A (VAR coefficients): Normal(0, 1) - captures autoregressive dynamics
-            - B (exogenous effects): Normal(0, 1) - captures marketing impacts
-            - Sigma (covariance): LKJ prior for correlation structure
-
-        Returns:
-            None (stores model in self.model)
-        """
         with pm.Model() as self.model:
-            # Priors for the VAR coefficients (autoregressive dynamics)
-            # Shape: (n_variables, n_variables * n_lags)
-            A = pm.Normal(
-                'A',
-                mu=0,
-                sigma=1,
-                shape=(self.endog.shape[1], self.endog.shape[1] * self.lags)
-            )
+            # Priors for the VAR coefficients (A)
+            # Shape: (n_endog, n_endog * lags)
+            # A[i, j] is the effect of lagged variable j on current variable i
+            A = pm.Normal('A', mu=0, sigma=1, shape=(n_endog, n_lagged))
 
-            # Priors for the exogenous coefficients (marketing effects)
-            # Shape: (n_variables, n_channels)
-            B = pm.Normal(
-                'B',
-                mu=0,
-                sigma=1,
-                shape=(self.endog.shape[1], self.exog.shape[1])
-            )
+            # Priors for the exogenous coefficients (B)
+            # Shape: (n_endog, n_exog)
+            # B[i, j] is the effect of exogenous variable j on endogenous variable i
+            B = pm.Normal('B', mu=0, sigma=1, shape=(n_endog, n_exog))
 
-            # Priors for the covariance matrix
-            # LKJ prior encourages correlation structure among variables
-            chol, _, _ = pm.LKJCholeskyCov(
+            # Priors for the covariance matrix using LKJ Cholesky
+            chol, corr, stds = pm.LKJCholeskyCov(
                 'chol',
-                n=self.endog.shape[1],
+                n=n_endog,
                 eta=2.0,
+                sd_dist=pm.HalfNormal.dist(sigma=1.0),
                 compute_corr=True
             )
 
-            # VAR model implementation
-            # TODO: Implement the complete BVAR likelihood
-            # For each time t > lags:
-            #   mu[t] = sum(A_i * y[t-i]) + B * x[t]
-            #   y[t] ~ MultivariateNormal(mu[t], Sigma)
-            pass
+            # VAR model: Y_t = A @ Y_{t-1:t-L} + B @ X_t + epsilon
+            # Compute predicted values for each observation
+            mu = pm.Deterministic(
+                'mu',
+                pm.math.dot(self.X_lagged, A.T) + pm.math.dot(self.X_exog, B.T)
+            )
+
+            # Likelihood: Multivariate Normal
+            # Y[t] ~ MVN(mu[t], Sigma)
+            Y_obs = pm.MvNormal(
+                'Y_obs',
+                mu=mu,
+                chol=chol,
+                observed=self.Y
+            )
 
     def fit(self, draws=1000, tune=1000):
         """
         Fit the BVAR model using MCMC sampling.
 
-        Args:
-            draws (int): Number of posterior samples to draw (default: 1000)
-            tune (int): Number of tuning/warmup samples (default: 1000)
-
-        Returns:
-            None (stores trace in self.trace)
-
-        Note:
-            For BVAR models, consider using at least 2000 draws to ensure
-            convergence of the covariance matrix parameters.
+        Parameters:
+        -----------
+        draws : int
+            Number of MCMC samples to draw
+        tune : int
+            Number of tuning/warmup samples
         """
         with self.model:
-            self.trace = pm.sample(draws=draws, tune=tune, cores=1)
+            self.trace = pm.sample(draws=draws, tune=tune, cores=1, random_seed=42)
 
-    def calculate_irf(self, periods=52):
+    def calculate_irf(self, periods=24, shock_size=1.0):
         """
         Calculate Impulse Response Functions (IRF).
 
-        IRF traces the effect of a one-time "shock" (impulse) to marketing spend
-        as it propagates through the system over time:
-            Marketing Spend → Brand Awareness → Brand Consideration → Base Sales
+        Traces the dynamic response of endogenous variables to a one-time shock
+        in exogenous variables (marketing spend).
 
-        Args:
-            periods (int): Number of periods to trace the impulse
-                          (default: 52 weeks for annual effect)
+        Parameters:
+        -----------
+        periods : int
+            Number of periods to simulate forward (default: 24 weeks)
+        shock_size : float
+            Size of the shock to apply (default: 1.0 = $1M or 1 unit)
 
         Returns:
-            dict: Dictionary containing IRFs for each variable response to each shock
-                 Keys: ('shock_variable', 'response_variable')
-                 Values: np.ndarray of shape (periods,) with IRF values
-
-        Example:
-            >>> irf = bvar.calculate_irf(periods=52)
-            >>> # Effect of marketing on base sales over 52 weeks
-            >>> marketing_to_sales = irf[('marketing', 'base_sales')]
-            >>> cumulative_effect = marketing_to_sales.sum()
+        --------
+        irf_results : dict
+            Dictionary containing IRF arrays for each exog → endog relationship
+            Keys: "exog_{i}_to_endog_{j}"
+            Values: array of shape (periods,) showing response over time
         """
-        # TODO: Implement Impulse Response Function calculation
-        # Steps:
-        # 1. Extract VAR coefficient matrices from posterior (use mean)
-        # 2. For each period, compute: IRF[t] = A^t (matrix power)
-        # 3. Return IRF arrays for each variable combination
-        pass
+        if self.trace is None:
+            raise ValueError("Model must be fit before calculating IRF")
 
-    def plot_irf(self, irf, variable_names=None):
+        # Get posterior means of coefficients
+        A_mean = self.trace.posterior['A'].mean(dim=['chain', 'draw']).values
+        B_mean = self.trace.posterior['B'].mean(dim=['chain', 'draw']).values
+
+        n_endog = self.endog.shape[1]
+        n_exog = self.exog.shape[1]
+
+        # Initialize IRF storage
+        irf_results = {}
+
+        # For each exogenous variable (marketing channel)
+        for exog_idx in range(n_exog):
+            # Create shock vector: 1 unit shock to channel exog_idx at time 0
+            shock = np.zeros(n_exog)
+            shock[exog_idx] = shock_size
+
+            # Simulate forward for each endogenous variable
+            for endog_idx in range(n_endog):
+                # Initialize response trajectory
+                response = np.zeros(periods)
+
+                # Initialize state: Y[t-L], ..., Y[t-1]
+                state = np.zeros((self.lags, n_endog))
+
+                # Simulate forward
+                for t in range(periods):
+                    # Flatten lagged state: [Y[t-1], Y[t-2], ..., Y[t-L]]
+                    lagged_flat = state[::-1].flatten()  # Reverse order for most recent first
+
+                    # Compute prediction: A @ lagged + B @ shock
+                    if t == 0:
+                        # Apply shock at t=0
+                        pred = A_mean @ lagged_flat + B_mean @ shock
+                    else:
+                        # No shock after t=0
+                        pred = A_mean @ lagged_flat
+
+                    # Store response for this endogenous variable
+                    response[t] = pred[endog_idx]
+
+                    # Update state: shift and add new prediction
+                    state = np.roll(state, 1, axis=0)
+                    state[0] = pred
+
+                # Store IRF
+                key = f"{self.exog_names[exog_idx]}_to_{self.endog_names[endog_idx]}"
+                irf_results[key] = response
+
+        self.irf_results = irf_results
+        return irf_results
+
+    def plot_irf(self, irf=None, figsize=(15, 10)):
         """
         Plot Impulse Response Functions.
 
-        Creates visualization showing how shocks to one variable affect others
-        over time. Useful for understanding the dynamic propagation of marketing
-        effects through brand metrics to sales.
+        Parameters:
+        -----------
+        irf : dict, optional
+            IRF results from calculate_irf(). If None, uses self.irf_results
+        figsize : tuple
+            Figure size (width, height)
+        """
+        if irf is None:
+            if not hasattr(self, 'irf_results'):
+                raise ValueError("No IRF results found. Run calculate_irf() first.")
+            irf = self.irf_results
 
-        Args:
-            irf (dict): Output from calculate_irf()
-            variable_names (list): Names of variables for labeling
-                                  (default: ['Var1', 'Var2', ...])
+        n_exog = len(self.exog_names)
+        n_endog = len(self.endog_names)
+
+        # Create subplot grid
+        fig, axes = plt.subplots(n_endog, n_exog, figsize=figsize, sharex=True)
+
+        if n_endog == 1:
+            axes = axes.reshape(1, -1)
+        if n_exog == 1:
+            axes = axes.reshape(-1, 1)
+
+        # Plot each IRF
+        for exog_idx, exog_name in enumerate(self.exog_names):
+            for endog_idx, endog_name in enumerate(self.endog_names):
+                ax = axes[endog_idx, exog_idx]
+
+                key = f"{exog_name}_to_{endog_name}"
+                if key in irf:
+                    response = irf[key]
+                    periods = len(response)
+                    time_idx = np.arange(periods)
+
+                    # Plot response
+                    ax.plot(time_idx, response, linewidth=2, color='steelblue')
+                    ax.axhline(0, color='black', linestyle='--', linewidth=0.8, alpha=0.5)
+                    ax.fill_between(time_idx, 0, response, alpha=0.3, color='steelblue')
+
+                    # Labels
+                    ax.set_title(f"{exog_name} → {endog_name}", fontsize=10, fontweight='bold')
+                    ax.set_ylabel('Response', fontsize=9)
+                    ax.grid(True, alpha=0.3)
+
+                    # Only show x-label on bottom row
+                    if endog_idx == n_endog - 1:
+                        ax.set_xlabel('Periods', fontsize=9)
+
+        plt.tight_layout()
+        return fig
+
+    def calculate_long_term_roi(self, irf=None, sales_var_name=None):
+        """
+        Calculate long-term ROI from brand-building effects.
+
+        Integrates the IRF to estimate cumulative sales lift from a $1 marketing shock.
+
+        Parameters:
+        -----------
+        irf : dict, optional
+            IRF results. If None, uses self.irf_results
+        sales_var_name : str, optional
+            Name of the sales endogenous variable (default: first endog variable)
 
         Returns:
-            matplotlib.figure.Figure: Figure object with IRF plots
-
-        Example:
-            >>> irf = bvar.calculate_irf(52)
-            >>> fig = bvar.plot_irf(irf, ['Base Sales', 'Awareness', 'Consideration'])
-            >>> fig.savefig('irf_analysis.png')
+        --------
+        roi_dict : dict
+            Long-term ROI per marketing channel
+            Keys: channel names
+            Values: cumulative sales lift per $1 spent
         """
-        # TODO: Implement IRF plotting
-        # Create grid of subplots showing:
-        # - Each row: impulse to one variable
-        # - Each column: response of each variable
-        # - Include confidence bands from posterior uncertainty
-        pass
+        if irf is None:
+            if not hasattr(self, 'irf_results'):
+                raise ValueError("No IRF results found. Run calculate_irf() first.")
+            irf = self.irf_results
 
-    def calculate_long_term_roi(self, irf, base_sales_idx=0, cost_per_unit=1.0):
+        # Determine which endogenous variable represents sales
+        if sales_var_name is None:
+            sales_var_name = self.endog_names[0]  # Default to first variable
+            print(f"Assuming '{sales_var_name}' represents sales variable")
+
+        roi_dict = {}
+
+        # For each marketing channel (exogenous variable)
+        for exog_name in self.exog_names:
+            key = f"{exog_name}_to_{sales_var_name}"
+
+            if key in irf:
+                # Cumulative sales lift = sum of IRF over all periods
+                cumulative_lift = np.sum(irf[key])
+
+                # ROI = cumulative_lift / $1 shock
+                roi_dict[exog_name] = cumulative_lift
+            else:
+                print(f"Warning: IRF key '{key}' not found. Skipping {exog_name}")
+
+        return roi_dict
+
+    def plot_long_term_roi(self, roi_dict):
         """
-        Calculate long-term ROI from Impulse Response Functions.
+        Visualize long-term ROI by channel.
 
-        Long-term ROI captures the sustained lift in base sales from brand-building,
-        beyond the immediate activation effects measured by UCM-MMM.
-
-        Args:
-            irf (dict): Impulse response functions from calculate_irf()
-            base_sales_idx (int): Index of base sales variable in endog array
-            cost_per_unit (float): Cost per unit of marketing spend
-
-        Returns:
-            dict: Long-term ROI metrics by channel
-                 Keys: channel names
-                 Values: {
-                     'total_lift': cumulative sales lift over IRF period,
-                     'roi': return on investment ratio,
-                     'peak_effect_week': week with maximum impact
-                 }
-
-        Example:
-            >>> irf = bvar.calculate_irf(52)
-            >>> roi = bvar.calculate_long_term_roi(irf)
-            >>> print(f"LinkedIn long-term ROI: {roi['linkedin']['roi']:.2f}x")
+        Parameters:
+        -----------
+        roi_dict : dict
+            ROI per channel from calculate_long_term_roi()
         """
-        # TODO: Implement long-term ROI calculation
-        # Steps:
-        # 1. For each marketing channel, extract IRF to base sales
-        # 2. Calculate cumulative lift: sum of IRF over all periods
-        # 3. Calculate ROI: (cumulative_lift - cost) / cost
-        # 4. Identify timing metrics (peak week, half-life)
-        pass
+        channels = list(roi_dict.keys())
+        roi_values = list(roi_dict.values())
 
-    def forecast(self, horizon=12):
-        """
-        Generate forecasts for endogenous variables.
+        fig, ax = plt.subplots(figsize=(10, 6))
 
-        Args:
-            horizon (int): Number of periods to forecast ahead
+        # Bar chart
+        colors = sns.color_palette("viridis", len(channels))
+        bars = ax.bar(channels, roi_values, color=colors, alpha=0.8, edgecolor='black')
 
-        Returns:
-            np.ndarray: Forecasted values (horizon x n_variables)
+        # Add value labels on bars
+        for bar in bars:
+            height = bar.get_height()
+            ax.text(
+                bar.get_x() + bar.get_width() / 2.,
+                height,
+                f'${height:.2f}',
+                ha='center',
+                va='bottom',
+                fontweight='bold'
+            )
 
-        Note:
-            TODO: Implement forecasting using posterior predictive distribution
-        """
-        # TODO: Implement forecasting
-        pass
+        ax.set_ylabel('Long-Term ROI ($ per $ spent)', fontsize=12, fontweight='bold')
+        ax.set_xlabel('Marketing Channel', fontsize=12, fontweight='bold')
+        ax.set_title('Long-Term ROI from Brand-Building Effects', fontsize=14, fontweight='bold')
+        ax.axhline(0, color='black', linewidth=0.8)
+        ax.grid(axis='y', alpha=0.3)
+
+        plt.xticks(rotation=45, ha='right')
+        plt.tight_layout()
+
+        return fig
+
+    def summary(self):
+        """Return summary statistics of the posterior distribution."""
+        if self.trace is None:
+            raise ValueError("Model must be fit before getting summary")
+        return pm.summary(self.trace)
