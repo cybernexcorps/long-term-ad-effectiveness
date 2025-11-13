@@ -21,13 +21,11 @@ from pathlib import Path
 import arviz as az
 from scipy.optimize import minimize
 
-# Try to configure JAX (optional)
-try:
-    import config_jax
-    print("✓ JAX backend configured")
-except Exception as e:
-    print(f"⚠ JAX not available: {e}")
-    print("  Continuing with default backend (slower but functional)")
+# Note: JAX is disabled for this test due to incompatibility with multiprocessing
+# JAX + os.fork() causes deadlocks when using multiple chains
+# For single-chain runs, you can enable JAX for 5-20x speedup
+print("ℹ JAX backend DISABLED (multiprocessing incompatibility)")
+print("  Using default PyTensor backend for stable 4-chain sampling")
 
 from mmm_optimized import UCM_MMM_Optimized
 from bvar_optimized import BVAR_Optimized
@@ -273,7 +271,7 @@ def main():
     print("  • 4 chains × 500 draws for robust convergence")
     print("  • Posterior predictive checks for model validation")
     print("  • Budget optimization for ROI maximization")
-    print("  • JAX backend for acceleration")
+    print("  • Default PyTensor backend (JAX disabled for multiprocessing)")
     print()
 
     # =========================================================================
@@ -336,8 +334,8 @@ def main():
     print("\n[3/10] Fitting UCM-MMM with ENHANCED CONFIGURATION...")
     print("   → Configuration: 500 tuning + 500 draws × 4 chains")
     print("   → Target accept: 0.95 (very robust)")
-    print("   → Estimated time: 10-15 minutes (with JAX)")
-    print("   ⚠ This may take a while - patience is rewarded with better convergence!")
+    print("   → Estimated time: 15-25 minutes (without JAX)")
+    print("   ⚠ This will take a while - patience is rewarded with better convergence!")
 
     start_time = time.time()
 
