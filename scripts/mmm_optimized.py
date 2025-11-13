@@ -12,7 +12,7 @@ Improvements over mmm.py:
 import pymc as pm
 import numpy as np
 import pytensor.tensor as pt
-from pymc_marketing.mmm.transformers import geometric_adstock, logistic_saturation
+from pymc_marketing.mmm.transformers import geometric_adstock
 
 
 class UCM_MMM_Optimized:
@@ -82,8 +82,10 @@ class UCM_MMM_Optimized:
 
             # Saturation parameters
             # Lambda: Half-saturation point (typical weekly spend level)
-            # Prior: LogNormal centered around median spend per channel
+            # Prior: Gamma centered around median spend per channel
             median_spend = np.median(self.marketing_data, axis=0)
+            # Add small epsilon to avoid division by zero
+            median_spend = np.where(median_spend == 0, 1.0, median_spend)
             lam = pm.Gamma(
                 "lambda",
                 alpha=2.0,
@@ -119,17 +121,17 @@ class UCM_MMM_Optimized:
             )
 
             # =====================================================================
-            # SATURATION TRANSFORMATION (PyMC-Marketing)
+            # SATURATION TRANSFORMATION (Hill function)
             # =====================================================================
 
-            # Use PyMC-Marketing's logistic saturation
+            # Hill saturation: y = x^kappa / (lambda^kappa + x^kappa)
+            # More flexible than logistic - allows varying steepness
+            x_powered = pt.power(adstocked_marketing, kappa)
+            lam_powered = pt.power(lam, kappa)
+
             saturated_marketing = pm.Deterministic(
                 "saturated_marketing",
-                logistic_saturation(
-                    x=adstocked_marketing,
-                    lam=lam,
-                    beta=kappa
-                )
+                x_powered / (lam_powered + x_powered)
             )
 
             # =====================================================================
